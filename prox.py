@@ -13,6 +13,8 @@ TODO:
 from socket import *
 import errno, optparse, os, socket, ssl, time
 from select import *
+import struct
+import platform
 
 class Error(Exception) :
     pass
@@ -148,7 +150,7 @@ class Half(object) :
             if e.args[0] == ssl.SSL_ERROR_EOF :
                 return self.error("eof", e)
             return self.error("recv ssl error", e)
-        except socket.error, e : 
+        except socket.error, e :
             if e.errno == errno.EWOULDBLOCK :
                 self.ready = False
                 return
@@ -173,6 +175,17 @@ class Proxy(object) :
     def __init__(self, opt, sock, addr) :
         print "New client %s" % (addr,)
         self.opt = opt
+
+        if opt.originalDst :
+            try :
+                sockaddr_in = sock.getsockopt(socket.SOL_IP, 80, 16)  # SO_ORIGINAL_DST = 80
+            except socket.error :
+                raise Error("SO_ORIGINAL_DST not supported on this platform")
+            _, port, a, b, c, d = struct.unpack('!HHBBBB', sockaddr_in[:8])
+            print('Original destination was: %d.%d.%d.%d:%d' % (a, b, c, d, port))
+            self.opt.addr = '%d.%d.%d.%d' % (a, b, c, d)
+            self.opt.port = port
+
         self.cl = Half(opt, sock, addr, 'i')
         # note: blocking connect for simplicity for now...
         ver = getSslVers(opt, opt.sslOut)
@@ -235,6 +248,7 @@ def getopts() :
     p.add_option('-1', dest='oneshot', action='store_true', help="Handle a single connection")
     p.add_option("-l", dest="logFile", help="Filename to log to")
     p.add_option("-m", dest="modules", action="append", default=[], help="filtering modules")
+    p.add_option("-O", dest="originalDst", action="store_true", help="Use SO_ORIGINAL_DST for destination")
     opt,args = p.parse_args()
     if opt.ssl :
         opt.sslIn = True
@@ -243,8 +257,10 @@ def getopts() :
         p.error("-3 and -T cannot be used together")
     if opt.bindAddr == '0.0.0.0' and opt.ip6 :
         opt.bindAddr = '::'
-    if len(args) != 2 :
-        p.error("specify address and port")
+    if opt.originalDst and platform.system() != "Linux" :
+        p.error("SO_ORIGINAL_DST is only supported in Linux systems")
+    if len(args) != 2 and not opt.originalDst :
+        p.error("specify address and port or use -O")
     if opt.cert is None :
         opt.cert = "ca" if opt.autoCname else "cert"
     if opt.ssl and opt.cert is None :
@@ -252,13 +268,17 @@ def getopts() :
             p.error("specify CA cert")
         else :
             p.error("specify SSL cert")
-    opt.addr = args[0]
-    try :
-        opt.port = int(args[1])
-    except ValueError :
-        p.error("invalid port: " + args[1])
+    if not opt.originalDst :
+        opt.addr = args[0]
+        try :
+            opt.port = int(args[1])
+        except ValueError :
+            p.error("invalid port: " + args[1])
     if opt.locPort == None :
-        opt.locPort = opt.port
+        if opt.originalDst :
+            p.error("-O requires -L")
+        else :
+            opt.locPort = opt.port
     return opt
 
 def initModule(modstr) :
@@ -281,4 +301,3 @@ def main() :
 
 if __name__ == '__main__' :
     main()
-
